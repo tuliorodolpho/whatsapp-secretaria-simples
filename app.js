@@ -1,85 +1,17 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
 const axios = require('axios');
-const pino = require('pino');
-const fs = require('fs');
+const twilio = require('twilio');
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
-let sock;
+const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+
+const client = twilio(TWILIO_SID, TWILIO_TOKEN);
 let eventos = [];
-
-// Conecta WhatsApp
-async function conectarWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-
-    sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: true,
-        logger: pino({ level: 'silent' })
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if(connection === 'close') {
-            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Conexão fechada. Reconectando:', shouldReconnect);
-            if(shouldReconnect) {
-                conectarWhatsApp();
-            }
-        } else if(connection === 'open') {
-            console.log('✅ WhatsApp conectado!');
-        }
-    });
-
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
-
-        const texto = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-        const remetente = msg.key.remoteJid;
-
-        console.log('Mensagem:', texto);
-
-        let resposta = '';
-
-        if (texto.toLowerCase() === 'menu') {
-            resposta = `🤖 *SECRETÁRIA IA*
-
-📝 Comandos:
-• "Reunião amanhã 15h"
-• "Anota: comprar leite"
-• *agenda* - ver eventos`;
-        }
-        else if (texto.toLowerCase() === 'agenda') {
-            if (eventos.length === 0) {
-                resposta = '✨ Nenhum compromisso!';
-            } else {
-                resposta = '📅 *Seus compromissos:*\n\n';
-                eventos.forEach(e => {
-                    resposta += `• ${e.titulo}\n  ${e.data} às ${e.hora}\n\n`;
-                });
-            }
-        }
-        else {
-            const info = await processarIA(texto);
-
-            if (info.tipo === 'compromisso' && info.data && info.hora) {
-                eventos.push(info);
-                resposta = `✅ *Agendado!*\n\n📅 ${info.titulo}\n🕐 ${info.data} às ${info.hora}`;
-            } else {
-                resposta = `✅ *Anotado!*\n\n📝 ${info.titulo}`;
-            }
-        }
-
-        await sock.sendMessage(remetente, { text: resposta });
-    });
-}
 
 async function processarIA(texto) {
     try {
@@ -112,16 +44,64 @@ Texto: ${texto}`;
 
         return JSON.parse(response.data.choices[0].message.content);
     } catch (e) {
+        console.error('Erro IA:', e);
         return { tipo: 'anotacao', titulo: texto, data: null, hora: null };
     }
 }
 
-// Endpoint teste
-app.get('/', (req, res) => {
-    res.send(`✅ Secretária Online! Eventos: ${eventos.length}`);
+app.post('/webhook', async (req, res) => {
+    const mensagem = req.body.Body || '';
+    const remetente = req.body.From;
+
+    console.log('Mensagem recebida:', mensagem);
+
+    const twiml = new twilio.twiml.MessagingResponse();
+    let resposta = '';
+
+    const texto = mensagem.toLowerCase().trim();
+
+    if (texto === 'menu' || texto === 'ajuda') {
+        resposta = `🤖 *SECRETÁRIA IA*
+
+📝 Comandos:
+• "Reunião amanhã 15h"
+• "Anota: comprar leite"
+• *agenda* - ver eventos
+
+Seja natural!`;
+    }
+    else if (texto === 'agenda') {
+        if (eventos.length === 0) {
+            resposta = '✨ Nenhum compromisso agendado!';
+        } else {
+            resposta = '📅 *Seus compromissos:*\n\n';
+            eventos.forEach(e => {
+                resposta += `• ${e.titulo}\n  ${e.data} às ${e.hora}\n\n`;
+            });
+        }
+    }
+    else {
+        const info = await processarIA(mensagem);
+
+        if (info.tipo === 'compromisso' && info.data && info.hora) {
+            eventos.push(info);
+            resposta = `✅ *Compromisso Agendado!*\n\n📅 ${info.titulo}\n🕐 ${info.data} às ${info.hora}`;
+        } else {
+            resposta = `✅ *Anotado!*\n\n📝 ${info.titulo}`;
+        }
+    }
+
+    twiml.message(resposta);
+
+    res.writeHead(200, {'Content-Type': 'text/xml'});
+    res.end(twiml.toString());
 });
 
-app.listen(process.env.PORT || 3000, () => {
-    console.log('🚀 Servidor rodando!');
-    conectarWhatsApp();
+app.get('/', (req, res) => {
+    res.send(`✅ Secretária IA Online!\n📊 Eventos: ${eventos.length}`);
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🚀 Servidor rodando na porta ${PORT}`);
 });
